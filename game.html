@@ -1,0 +1,295 @@
+// 1. Firebase RTDB 설정 연동
+const firebaseConfig = {
+  databaseURL: "https://game-server-54f8d-default-rtdb.firebaseio.com",
+  projectId: "game-server-54f8d"
+};
+firebase.initializeApp(firebaseConfig);
+const db = firebase.database();
+
+// 고유 플레이어 ID 및 방 설정 (1대1 매치)
+const myId = "p_" + Math.random().toString(36).substring(2, 9);
+const roomRef = db.ref("rooms/room1");
+const myRef = roomRef.child("players/" + myId);
+
+let myRole = null; // 'p1' or 'p2'
+let oppId = null;
+let myHp = 100;
+let myScore = 0;
+let oppScore = 0;
+
+// 2. Three.js 씬 & 맵 구성 (로블록스 아스널 느낌의 아레나)
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x87ceeb); // 하늘색
+
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+document.body.appendChild(renderer.domElement);
+
+// 조명
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+scene.add(ambientLight);
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+dirLight.position.set(20, 40, 20);
+scene.add(dirLight);
+
+// 바닥 (아레나)
+const floorGeo = new THREE.PlaneGeometry(100, 100);
+const floorMat = new THREE.MeshStandardMaterial({ color: 0x444444 });
+const floor = new THREE.Mesh(floorGeo, floorMat);
+floor.rotation.x = -Math.PI / 2;
+scene.add(floor);
+
+// 장애물 상자들 (엄폐물)
+const obstacleMat = new THREE.MeshStandardMaterial({ color: 0xc87d55 });
+const obstacles = [];
+const boxPositions = [
+  [0, 2, 0], [10, 2, 10], [-10, 2, -10],
+  [15, 2, -15], [-15, 2, 15], [0, 4, 15], [0, 4, -15]
+];
+boxPositions.forEach(([x, y, z]) => {
+  const box = new THREE.Mesh(new THREE.BoxGeometry(4, 4, 4), obstacleMat);
+  box.position.set(x, y, z);
+  scene.add(box);
+  obstacles.push(box);
+});
+
+// 내 1인칭 총기 모델
+const gun = new THREE.Mesh(
+  new THREE.BoxGeometry(0.15, 0.15, 0.8),
+  new THREE.MeshStandardMaterial({ color: 0x222222 })
+);
+gun.position.set(0.3, -0.25, -0.5);
+camera.add(gun);
+scene.add(camera);
+
+// 상대방 플레이어 3D 모델 (아스널 스타일 블록 캐릭터)
+const oppGroup = new THREE.Group();
+const oppBody = new THREE.Mesh(new THREE.BoxGeometry(1, 1.8, 0.8), new THREE.MeshStandardMaterial({ color: 0xe53935 }));
+oppBody.position.y = 0.9;
+oppGroup.add(oppBody);
+const oppHead = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.7, 0.7), new THREE.MeshStandardMaterial({ color: 0xffeb3b }));
+oppHead.position.y = 2.15;
+oppGroup.add(oppHead);
+const oppGun = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.15, 0.8), new THREE.MeshStandardMaterial({ color: 0x111111 }));
+oppGun.position.set(0.6, 1.1, -0.3);
+oppGroup.add(oppGun);
+oppGroup.visible = false;
+scene.add(oppGroup);
+
+// 플레이어 물리 및 위치
+let position = new THREE.Vector3(0, 1.6, 20);
+let velocity = new THREE.Vector3();
+let yaw = 0, pitch = 0;
+let isGrounded = true;
+
+// 3. 조작 입력 처리 (PC & 모바일)
+const keys = {};
+window.addEventListener("keydown", (e) => (keys[e.code] = true));
+window.addEventListener("keyup", (e) => (keys[e.code] = false));
+
+// PC 마우스 룩
+let isPointerLocked = false;
+document.getElementById("start-btn").addEventListener("click", () => {
+  document.getElementById("blocker").style.display = "none";
+  document.body.requestPointerLock();
+});
+document.addEventListener("pointerlockchange", () => {
+  isPointerLocked = document.pointerLockElement === document.body;
+});
+window.addEventListener("mousemove", (e) => {
+  if (isPointerLocked) {
+    yaw -= e.movementX * 0.0025;
+    pitch -= e.movementY * 0.0025;
+    pitch = Math.max(-Math.PI / 2.2, Math.min(Math.PI / 2.2, pitch));
+  }
+});
+window.addEventListener("mousedown", (e) => {
+  if (isPointerLocked && e.button === 0) shoot();
+});
+
+// 모바일 터치 조이스틱 & 조준 처리
+let joyMove = { x: 0, y: 0 };
+const joyZone = document.getElementById("joystick-zone");
+const joyThumb = document.getElementById("joystick-thumb");
+joyZone.addEventListener("touchmove", (e) => {
+  const touch = e.touches[0];
+  const rect = joyZone.getBoundingClientRect();
+  let dx = touch.clientX - (rect.left + 60);
+  let dy = touch.clientY - (rect.top + 60);
+  const dist = Math.min(45, Math.hypot(dx, dy));
+  const angle = Math.atan2(dy, dx);
+  joyMove.x = (Math.cos(angle) * dist) / 45;
+  joyMove.y = (Math.sin(angle) * dist) / 45;
+  joyThumb.style.transform = `translate(${joyMove.x * 35}px, ${joyMove.y * 35}px)`;
+});
+joyZone.addEventListener("touchend", () => {
+  joyMove = { x: 0, y: 0 };
+  joyThumb.style.transform = `translate(0px, 0px)`;
+});
+
+let lastTouchX = null, lastTouchY = null;
+const touchAimZone = document.getElementById("touch-aim-zone");
+touchAimZone.addEventListener("touchmove", (e) => {
+  const touch = e.touches[0];
+  if (lastTouchX !== null) {
+    const dx = touch.clientX - lastTouchX;
+    const dy = touch.clientY - lastTouchY;
+    yaw -= dx * 0.005;
+    pitch -= dy * 0.005;
+    pitch = Math.max(-Math.PI / 2.2, Math.min(Math.PI / 2.2, pitch));
+  }
+  lastTouchX = touch.clientX;
+  lastTouchY = touch.clientY;
+});
+touchAimZone.addEventListener("touchend", () => { lastTouchX = null; lastTouchY = null; });
+
+document.getElementById("mobile-shoot-btn").addEventListener("touchstart", (e) => { e.preventDefault(); shoot(); });
+document.getElementById("mobile-jump-btn").addEventListener("touchstart", (e) => {
+  e.preventDefault();
+  if (isGrounded) { velocity.y = 8; isGrounded = false; }
+});
+
+// 4. 사격 & 탄환 궤적 & 피격 판정
+const raycaster = new THREE.Raycaster();
+function shoot() {
+  // 총기 반동 애니메이션
+  gun.position.z = -0.35;
+  setTimeout(() => (gun.position.z = -0.5), 80);
+
+  // 화면 중앙 레이캐스트
+  raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+  const hits = raycaster.intersectObject(oppGroup, true);
+
+  if (hits.length > 0 && oppId) {
+    // 상대방 적중 이벤트 Firebase 전송 (25 데미지)
+    db.ref(`rooms/room1/players/${oppId}/hit`).set({
+      from: myId,
+      damage: 25,
+      time: Date.now()
+    });
+  }
+}
+
+// 5. Firebase 동기화 (방 입장, 위치, 피격, 리스폰)
+myRef.set({
+  id: myId,
+  x: position.x,
+  y: position.y,
+  z: position.z,
+  yaw: yaw,
+  pitch: pitch,
+  hp: 100,
+  score: 0
+});
+myRef.onDisconnect().remove();
+
+// 상대방 데이터 실시간 구독
+roomRef.child("players").on("value", (snapshot) => {
+  const players = snapshot.val() || {};
+  const ids = Object.keys(players);
+
+  // 1대1 매칭 대상 탐색
+  oppId = ids.find(id => id !== myId);
+  if (oppId && players[oppId]) {
+    oppGroup.visible = true;
+    const p = players[oppId];
+    oppGroup.position.set(p.x, p.y - 1.6, p.z);
+    oppGroup.rotation.y = p.yaw;
+    oppScore = p.score || 0;
+    document.getElementById("opp-score").innerText = oppScore;
+    document.getElementById("status-msg").innerText = "상대방 접속 중! (1대1 배틀)";
+  } else {
+    oppGroup.visible = false;
+    document.getElementById("status-msg").innerText = "상대방 접속 대기 중...";
+  }
+});
+
+// 피격 수신 리스너
+myRef.child("hit").on("value", (snapshot) => {
+  const hit = snapshot.val();
+  if (hit && hit.from !== myId) {
+    myHp = Math.max(0, myHp - hit.damage);
+    document.getElementById("hp").innerText = myHp;
+    if (myHp <= 0) {
+      // 사망: 상대 킬 점수 올리고 리스폰
+      db.ref(`rooms/room1/players/${hit.from}/score`).transaction(s => (s || 0) + 1);
+      respawn();
+    }
+  }
+});
+
+function respawn() {
+  myHp = 100;
+  document.getElementById("hp").innerText = myHp;
+  position.set((Math.random() - 0.5) * 30, 1.6, (Math.random() - 0.5) * 30);
+  alert("사망하셨습니다! 리스폰됩니다.");
+}
+
+// 6. 메인 게임 루프 (60FPS)
+const clock = new THREE.Clock();
+let syncTimer = 0;
+
+function animate() {
+  requestAnimationFrame(animate);
+  const delta = Math.min(clock.getDelta(), 0.1);
+
+  // 이동 계산 (PC WASD + 모바일 조이스틱 결합)
+  let moveX = joyMove.x;
+  let moveZ = joyMove.y;
+  if (keys["KeyW"]) moveZ = -1;
+  if (keys["KeyS"]) moveZ = 1;
+  if (keys["KeyA"]) moveX = -1;
+  if (keys["KeyD"]) moveX = 1;
+  if (keys["Space"] && isGrounded) { velocity.y = 8; isGrounded = false; }
+
+  // 카메라 방향 기준으로 이동 벡터 변환
+  const forward = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw)).normalize();
+  const side = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw)).normalize();
+  const dir = new THREE.Vector3()
+    .addScaledVector(forward, -moveZ)
+    .addScaledVector(side, moveX)
+    .normalize();
+
+  const speed = 12;
+  position.x += dir.x * speed * delta;
+  position.z += dir.z * speed * delta;
+
+  // 중력 및 점프
+  velocity.y -= 20 * delta;
+  position.y += velocity.y * delta;
+  if (position.y <= 1.6) {
+    position.y = 1.6;
+    velocity.y = 0;
+    isGrounded = true;
+  }
+
+  // 카메라 위치 & 회전 반영
+  camera.position.copy(position);
+  camera.rotation.order = "YXZ";
+  camera.rotation.y = yaw;
+  camera.rotation.x = pitch;
+
+  // 1초에 20번 내 위치 Firebase 전송
+  syncTimer += delta;
+  if (syncTimer > 0.05) {
+    syncTimer = 0;
+    myRef.update({
+      x: position.x,
+      y: position.y,
+      z: position.z,
+      yaw: yaw,
+      pitch: pitch
+    });
+  }
+
+  renderer.render(scene, camera);
+}
+animate();
+
+window.addEventListener("resize", () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
