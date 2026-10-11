@@ -17,15 +17,17 @@
     #status { color:#ffeb3b; font-size:13px; margin-top:4px; }
     #blocker { position:absolute; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); display:flex; justify-content:center; align-items:center; z-index:100; color:#fff; text-align:center; }
     #start-btn { padding:12px 24px; font-size:18px; background:#00c853; color:#fff; border:none; border-radius:8px; cursor:pointer; margin-top:12px; font-weight:bold; }
-    /* 모바일 컨트롤 UI */
+    
+    /* 모바일 컨트롤 */
     #mobile-controls { position:absolute; top:0; left:0; width:100%; height:100%; pointer-events:none; z-index:20; }
     #joystick-zone { position:absolute; bottom:30px; left:30px; width:110px; height:110px; border-radius:50%; background:rgba(255,255,255,0.2); border:2px solid rgba(255,255,255,0.5); pointer-events:auto; touch-action:none; }
     #joystick-thumb { position:absolute; top:32px; left:32px; width:45px; height:45px; border-radius:50%; background:rgba(255,255,255,0.7); pointer-events:none; }
     #touch-aim-zone { position:absolute; top:0; right:0; width:55%; height:100%; pointer-events:auto; touch-action:none; }
-    #mobile-btns { position:absolute; bottom:30px; right:30px; display:flex; flex-direction:column; gap:12px; pointer-events:auto; }
-    .m-btn { width:65px; height:65px; border-radius:50%; color:#fff; font-weight:bold; border:2px solid #fff; font-size:14px; }
-    #btn-shoot { background:rgba(255,50,50,0.8); }
-    #btn-jump { background:rgba(50,150,255,0.8); }
+    #mobile-btns { position:absolute; bottom:25px; right:25px; display:flex; flex-direction:column; gap:10px; pointer-events:auto; }
+    .m-btn { width:62px; height:62px; border-radius:50%; color:#fff; font-weight:bold; border:2px solid #fff; font-size:13px; }
+    #btn-shoot { background:rgba(255,50,50,0.85); width:70px; height:70px; font-size:15px; }
+    #btn-ads { background:rgba(255,165,0,0.85); }
+    #btn-jump { background:rgba(50,150,255,0.85); }
     @media(min-width: 900px) { #mobile-controls { display:none; } }
   </style>
 </head>
@@ -40,7 +42,7 @@
   <div id="blocker">
     <div>
       <h2>3D 1v1 총게임</h2>
-      <p style="margin-top:8px; font-size:14px; color:#ccc;">PC: 마우스 조준/클릭 사격 | 모바일: 화면 터치 조작</p>
+      <p style="margin-top:8px; font-size:14px; color:#ccc;">PC: 좌클릭 사격 / <b>우클릭 정조준(줌)</b><br>모바일: 우측 드래그 에임 / 🎯 조준 버튼</p>
       <button id="start-btn">게임 시작</button>
     </div>
   </div>
@@ -49,13 +51,14 @@
     <div id="joystick-zone"><div id="joystick-thumb"></div></div>
     <div id="touch-aim-zone"></div>
     <div id="mobile-btns">
+      <button class="m-btn" id="btn-ads">🎯 조준</button>
       <button class="m-btn" id="btn-shoot">🔥 사격</button>
       <button class="m-btn" id="btn-jump">⬆ 점프</button>
     </div>
   </div>
 
   <script>
-    // Firebase 연동
+    // 1. Firebase 연동
     firebase.initializeApp({
       databaseURL: "https://game-server-54f8d-default-rtdb.firebaseio.com",
       projectId: "game-server-54f8d"
@@ -64,9 +67,9 @@
     const myId = "p_" + Math.random().toString(36).substring(2, 8);
     const roomRef = db.ref("arena_1v1");
     const myRef = roomRef.child("players/" + myId);
-    let oppId = null, myHp = 100, oppScore = 0;
+    let oppId = null, myHp = 100;
 
-    // 3D 씬 설정
+    // 2. 씬 구성
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x87ceeb);
     const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
@@ -79,12 +82,11 @@
     sun.position.set(20, 40, 20);
     scene.add(sun);
 
-    // 맵 바닥 (100x100 크기 아레나)
+    // 맵
     const floor = new THREE.Mesh(new THREE.PlaneGeometry(100, 100), new THREE.MeshStandardMaterial({ color: 0x333333 }));
     floor.rotation.x = -Math.PI / 2;
     scene.add(floor);
 
-    // 엄폐물 박스
     const boxMat = new THREE.MeshStandardMaterial({ color: 0xb5651d });
     [[0,2,0],[10,2,10],[-10,2,-10],[15,2,-15],[-15,2,15],[0,3,15],[0,3,-15]].forEach(([x,y,z]) => {
       const b = new THREE.Mesh(new THREE.BoxGeometry(4, 4, 4), boxMat);
@@ -92,13 +94,18 @@
       scene.add(b);
     });
 
-    // 1인칭 총
+    // 1인칭 총기 모델
     const gun = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.12, 0.7), new THREE.MeshStandardMaterial({ color: 0x111111 }));
-    gun.position.set(0.25, -0.2, -0.4);
+    const defaultGunPos = new THREE.Vector3(0.25, -0.2, -0.4);
+    const adsGunPos = new THREE.Vector3(0.0, -0.14, -0.35); // 정조준 시 정중앙 위치
+    gun.position.copy(defaultGunPos);
     camera.add(gun);
     scene.add(camera);
 
-    // 상대방 캐릭터 모델
+    // 정조준 상태 플래그
+    let isAiming = false;
+
+    // 상대방 캐릭터
     const oppMesh = new THREE.Group();
     const body = new THREE.Mesh(new THREE.BoxGeometry(1, 1.8, 0.8), new THREE.MeshStandardMaterial({ color: 0xd32f2f }));
     body.position.y = 0.9;
@@ -109,29 +116,39 @@
     oppMesh.visible = false;
     scene.add(oppMesh);
 
-    // 이동/시점 변수
+    // 조작 변수
     let pos = new THREE.Vector3(0, 1.6, 20);
     let velY = 0, yaw = 0, pitch = 0, isGrounded = true;
-
-    // 조작
     const keys = {};
     window.addEventListener("keydown", e => keys[e.code] = true);
     window.addEventListener("keyup", e => keys[e.code] = false);
 
+    // PC 컨트롤 (좌클릭 사격, 우클릭 정조준)
     let isLocked = false;
     document.getElementById("start-btn").onclick = () => {
       document.getElementById("blocker").style.display = "none";
       document.body.requestPointerLock?.();
     };
     document.addEventListener("pointerlockchange", () => isLocked = document.pointerLockElement === document.body);
+    window.addEventListener("contextmenu", e => e.preventDefault()); // 우클릭 메뉴 방지
+
     window.addEventListener("mousemove", e => {
       if (!isLocked) return;
-      yaw -= e.movementX * 0.0025;
-      pitch = Math.max(-1.5, Math.min(1.5, pitch - e.movementY * 0.0025));
+      const sens = isAiming ? 0.0012 : 0.0025; // 조준 시 감도 부드럽게
+      yaw -= e.movementX * sens;
+      pitch = Math.max(-1.5, Math.min(1.5, pitch - e.movementY * sens));
     });
-    window.addEventListener("mousedown", e => { if (isLocked && e.button === 0) shoot(); });
 
-    // 모바일 터치 이벤트
+    window.addEventListener("mousedown", e => {
+      if (!isLocked) return;
+      if (e.button === 0) shoot();
+      if (e.button === 2) isAiming = true; // 우클릭 줌
+    });
+    window.addEventListener("mouseup", e => {
+      if (e.button === 2) isAiming = false; // 우클릭 떼면 해제
+    });
+
+    // 모바일 터치
     let joy = { x: 0, y: 0 };
     const jZone = document.getElementById("joystick-zone"), jThumb = document.getElementById("joystick-thumb");
     jZone.ontouchmove = e => {
@@ -149,28 +166,34 @@
     aZone.ontouchmove = e => {
       const t = e.touches[0];
       if (lastTx !== null) {
-        yaw -= (t.clientX - lastTx) * 0.005;
-        pitch = Math.max(-1.5, Math.min(1.5, pitch - (t.clientY - lastTy) * 0.005));
+        const sens = isAiming ? 0.0025 : 0.005;
+        yaw -= (t.clientX - lastTx) * sens;
+        pitch = Math.max(-1.5, Math.min(1.5, pitch - (t.clientY - lastTy) * sens));
       }
       lastTx = t.clientX; lastTy = t.clientY;
     };
     aZone.ontouchend = () => { lastTx = null; lastTy = null; };
 
+    document.getElementById("btn-ads").ontouchstart = e => {
+      e.preventDefault();
+      isAiming = !isAiming; // 모바일은 토글 방식
+      document.getElementById("btn-ads").style.background = isAiming ? "rgba(0,200,83,0.9)" : "rgba(255,165,0,0.85)";
+    };
     document.getElementById("btn-shoot").ontouchstart = e => { e.preventDefault(); shoot(); };
     document.getElementById("btn-jump").ontouchstart = e => { e.preventDefault(); if(isGrounded){ velY = 8; isGrounded = false; } };
 
-    // 사격 판정
+    // 사격
     const ray = new THREE.Raycaster();
     function shoot() {
-      gun.position.z = -0.25;
-      setTimeout(() => gun.position.z = -0.4, 80);
+      gun.position.z += 0.1;
+      setTimeout(() => { gun.position.z -= 0.1; }, 70);
       ray.setFromCamera(new THREE.Vector2(0, 0), camera);
       if (oppId && ray.intersectObject(oppMesh, true).length > 0) {
         roomRef.child(`players/${oppId}/hit`).set({ from: myId, dmg: 25, t: Date.now() });
       }
     }
 
-    // Firebase 동기화
+    // Firebase 통신
     myRef.set({ x: pos.x, y: pos.y, z: pos.z, yaw: yaw, hp: 100, score: 0 });
     myRef.onDisconnect().remove();
 
@@ -205,13 +228,22 @@
       }
     });
 
-    // 렌더 루프
+    // 메인 루프
     const clock = new THREE.Clock();
     let syncTimer = 0;
     function loop() {
       requestAnimationFrame(loop);
       const dt = Math.min(clock.getDelta(), 0.1);
 
+      // 정조준(줌) 보간 애니메이션
+      const targetFov = isAiming ? 45 : 75; // 조준 시 시야각 좁혀서 줌 인
+      camera.fov += (targetFov - camera.fov) * 0.2;
+      camera.updateProjectionMatrix();
+
+      const targetGunPos = isAiming ? adsGunPos : defaultGunPos;
+      gun.position.lerp(targetGunPos, 0.25);
+
+      // 이동
       let mx = joy.x, mz = joy.y;
       if (keys["KeyW"]) mz = -1;
       if (keys["KeyS"]) mz = 1;
@@ -223,8 +255,9 @@
       const s = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
       const d = new THREE.Vector3().addScaledVector(f, -mz).addScaledVector(s, mx).normalize();
 
-      pos.x += d.x * 12 * dt;
-      pos.z += d.z * 12 * dt;
+      const speed = isAiming ? 7 : 12; // 조준 중엔 이동 속도 감소
+      pos.x += d.x * speed * dt;
+      pos.z += d.z * speed * dt;
       velY -= 20 * dt;
       pos.y += velY * dt;
       if (pos.y <= 1.6) { pos.y = 1.6; velY = 0; isGrounded = true; }
